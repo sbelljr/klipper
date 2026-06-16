@@ -31,8 +31,21 @@ class DrawbotKinematics:
         s.set_trapq(toolhead.get_trapq())
         toolhead.register_step_generator(s.generate_steps)
 
+        # Load physical parameters for dynamic limit solving
+        self.toolhead_mass = config.getfloat('toolhead_mass', 0.2, above=0.) # kg
+        self.max_cable_tension = config.getfloat('max_cable_tension', 30.0, above=0.) # Newtons
+        
+        # Cable linear density in grams per meter (g/m)
+        # 0.15 g/m is typical for 0.5mm Dyneema braided fishing line
+        # 1.5 g/m is typical for heavier strings
+        self.cable_linear_density = config.getfloat('cable_linear_density', 0.0, minval=0.0)
+
+        # Pull global velocity and acceleration limits
+        self.max_velocity = config.getfloat('max_velocity', 300.0, above=0.)
+        self.max_accel = config.getfloat('max_accel', 1000.0, above=0.)
+
         # Setup boundary checks
-        # X range from left anchor to right anchor. 
+        # X range from left anchor to right anchor.
         # Y range goes from a safe lower limit (-300) up to the height of the anchors.
         self.axes_min = toolhead.Coord(min(self.anchors[0][0], self.anchors[1][0]), -300., 0., e=0.)
         self.axes_max = toolhead.Coord(max(self.anchors[0][0], self.anchors[1][0]), max(self.anchors[0][1], self.anchors[1][1]), 0., e=0.)
@@ -82,8 +95,80 @@ class DrawbotKinematics:
         homing_state.set_homed_position([0., 0., 0.])
 
     def check_move(self, move):
-        # XXX - boundary checks and speed limits not implemented
-        pass
+        x, y, z = move.end_pos[:3]
+        if move.move_d == 0.:
+            return
+            
+        # Unit direction vector of the move in Cartesian space
+        nx = move.axes_d[0] / move.move_d
+        ny = move.axes_d[1] / move.move_d
+        
+        gravity = 9.81 # m/s^2
+        
+        # Track the most restrictive speed/accel scaling factors
+        speed_factor = 1.0
+        accel_factor = 1.0
+        
+        # Calculate distance to anchors
+        L1 = math.sqrt((self.anchors[0][0] - x)**2 + (self.anchors[0][1] - y)**2)
+        L2 = math.sqrt((self.anchors[1][0] - x)**2 + (self.anchors[1][1] - y)**2)
+        
+        # Dynamic Effective Mass calculation to accommodate cable weight:
+        # L1 and L2 are in mm. Linear density is in grams/meter.
+        # total_cable_mass = (L1 + L2) * 1e-3 (m) * density * 1e-3 (kg)
+        total_cable_mass_kg = (L1 + L2) * self.cable_linear_density * 0.000001
+        
+        # Half of the cable mass is assumed to be supported by the carriage
+        effective_mass = self.toolhead_mass + (total_cable_mass_kg / 2.0)
+        
+        for i, (L, anchor) in enumerate(zip([L1, L2], self.anchors[:2])):
+            if L == 0.:
+                raise move.move_error("Collision with anchor point")
+                
+            # Unit vector pointing from toolhead to anchor
+            ux = (anchor[0] - x) / L
+            uy = (anchor[1] - y) / L
+            
+            # Projection of move direction onto cable direction
+            u_dot_n = ux * nx + uy * ny
+            
+            # 1. Stepper Acceleration Constraint (Anchor proximity)
+            # Limit carriage velocity to prevent centrifugal acceleration from exceeding limits:
+            # v^2 <= (max_accel * L) / (1 - (u.n)^2)
+            denom = 1.0 - u_dot_n**2
+            if denom > 0.001:
+                v_limit = math.sqrt((self.max_accel * L) / denom)
+                if v_limit < move.max_velocity:
+                    speed_factor = min(speed_factor, v_limit / move.max_velocity)
+
+            # 2. Cable Tension Constraint (Top-center proximity & gravity loading)
+            # Tension dynamic formula: T = m_eff * (g + a_y) * L / (2 * dy)
+            vertical_drop = anchor[1] - y
+            if vertical_drop <= 0.:
+                raise move.move_error("Move goes above anchor height")
+                
+            # Max vertical acceleration allowed (in m/s^2)
+            max_y_accel = (2.0 * self.max_cable_tension * vertical_drop) / (effective_mass * L) - gravity
+            
+            # Convert to mm/s^2 for Klipper planner
+            max_y_accel_mm = max_y_accel * 1000.0
+            
+            if max_y_accel_mm <= 0.:
+                raise move.move_error("Move exceeds static holding torque of motors (due to tension and cable weight)")
+                
+            # Scale move acceleration and speed if there is a vertical component
+            if abs(ny) > 0.01:
+                path_accel_limit = abs(max_y_accel_mm / ny)
+                if path_accel_limit < self.max_accel:
+                    accel_factor = min(accel_factor, path_accel_limit / self.max_accel)
+                    # Velocity scales with the square root of the acceleration (v = sqrt(2*a*s))
+                    speed_factor = min(speed_factor, math.sqrt(path_accel_limit / self.max_accel))
+
+        # Apply the dynamically calculated constraints to Klipper's planner
+        if speed_factor < 1.0 or accel_factor < 1.0:
+            new_velocity = move.max_velocity * speed_factor
+            new_accel = move.max_accel * accel_factor
+            move.limit_speed(new_velocity, new_accel)
 
     def get_status(self, eventtime):
         # XXX - homed_checks and rail limits not implemented
