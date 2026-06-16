@@ -153,8 +153,8 @@ class DrawbotKinematics:
             denom = 1.0 - u_dot_n**2
             if denom > 0.001:
                 v_limit = math.sqrt((self.max_accel * L) / denom)
-                if v_limit < move.max_velocity:
-                    speed_factor = min(speed_factor, v_limit / move.max_velocity)
+                if v_limit < self.max_velocity:
+                    speed_factor = min(speed_factor, v_limit / self.max_velocity)
 
             # 2. Cable Tension Constraint (Top-center proximity & gravity loading)
             # Tension dynamic formula: T = m_eff * (g + a_y) * L / (2 * dy)
@@ -181,8 +181,8 @@ class DrawbotKinematics:
 
         # Apply the dynamically calculated constraints to Klipper's planner
         if speed_factor < 1.0 or accel_factor < 1.0:
-            new_velocity = move.max_velocity * speed_factor
-            new_accel = move.max_accel * accel_factor
+            new_velocity = self.max_velocity * speed_factor
+            new_accel = self.max_accel * accel_factor
             move.limit_speed(new_velocity, new_accel)
 
     def get_status(self, eventtime):
