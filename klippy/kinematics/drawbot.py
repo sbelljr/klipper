@@ -15,6 +15,7 @@ class DrawbotKinematics:
         self.toolhead_mass = config.getfloat('toolhead_mass', 0.2, above=0.) # kg
         self.max_cable_tension = config.getfloat('max_cable_tension', 30.0, above=0.) # Newtons
         self.cable_linear_density = config.getfloat('cable_linear_density', 0.0, minval=0.0)
+        self.counterweight_mass = config.getfloat('counterweight_mass', 0.0, minval=0.0) # kg
         self.enable_catenary_compensation = config.getboolean('enable_catenary_compensation', False)
         
         # Calculate k_factor (rho / m) in mm^-1
@@ -128,6 +129,13 @@ class DrawbotKinematics:
         # Half of the cable mass is assumed to be supported by the carriage
         effective_mass = self.toolhead_mass + (total_cable_mass_kg / 2.0)
         
+        # Add counterweight bias to the allowed cable tension
+        # We subtract self.max_accel / 1000.0 to account for worst-case acceleration of the counterweight
+        cw_tension = self.counterweight_mass * (gravity - (self.max_accel / 1000.0))
+        if cw_tension < 0.0:
+            cw_tension = 0.0
+        allowed_tension = self.max_cable_tension + cw_tension
+        
         for i, (L, anchor) in enumerate(zip([L1, L2], self.anchors[:2])):
             if L == 0.:
                 raise move.move_error("Collision with anchor point")
@@ -155,7 +163,7 @@ class DrawbotKinematics:
                 raise move.move_error("Move goes above anchor height")
                 
             # Max vertical acceleration allowed (in m/s^2)
-            max_y_accel = (2.0 * self.max_cable_tension * vertical_drop) / (effective_mass * L) - gravity
+            max_y_accel = (2.0 * allowed_tension * vertical_drop) / (effective_mass * L) - gravity
             
             # Convert to mm/s^2 for Klipper planner
             max_y_accel_mm = max_y_accel * 1000.0
