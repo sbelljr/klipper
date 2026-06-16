@@ -11,38 +11,45 @@ class DrawbotKinematics:
         self.steppers = []
         self.anchors = []
 
-        name = 'stepper_a'
-        stepper_config = config.getsection(name)
-        s = stepper.PrinterStepper(stepper_config)
-        self.steppers.append(s)
-        a = tuple([stepper_config.getfloat('anchor_' + n) for n in 'xyz'])
-        self.anchors.append(a)
-        s.setup_itersolve('drawbot_stepper_alloc', *a)
-        s.set_trapq(toolhead.get_trapq())
-        toolhead.register_step_generator(s.generate_steps)
-
-        name = 'stepper_b'
-        stepper_config = config.getsection(name)
-        s = stepper.PrinterStepper(stepper_config)
-        self.steppers.append(s)
-        a = tuple([stepper_config.getfloat('anchor_' + n) for n in 'xyz'])
-        self.anchors.append(a)
-        s.setup_itersolve('drawbot_stepper_alloc', *a)
-        s.set_trapq(toolhead.get_trapq())
-        toolhead.register_step_generator(s.generate_steps)
-
         # Load physical parameters for dynamic limit solving
         self.toolhead_mass = config.getfloat('toolhead_mass', 0.2, above=0.) # kg
         self.max_cable_tension = config.getfloat('max_cable_tension', 30.0, above=0.) # Newtons
-        
-        # Cable linear density in grams per meter (g/m)
-        # 0.15 g/m is typical for 0.5mm Dyneema braided fishing line
-        # 1.5 g/m is typical for heavier strings
         self.cable_linear_density = config.getfloat('cable_linear_density', 0.0, minval=0.0)
+        self.enable_catenary_compensation = config.getboolean('enable_catenary_compensation', False)
+        
+        # Calculate k_factor (rho / m) in mm^-1
+        self.k_factor = 0.0
+        if self.enable_catenary_compensation and self.toolhead_mass > 0.0:
+            self.k_factor = self.cable_linear_density / (1000000.0 * self.toolhead_mass)
 
         # Pull global velocity and acceleration limits
         self.max_velocity = config.getfloat('max_velocity', 300.0, above=0.)
         self.max_accel = config.getfloat('max_accel', 1000.0, above=0.)
+
+        # 1. Parse configs and extract anchors
+        stepper_configs = []
+        for name in ['stepper_a', 'stepper_b']:
+            s_config = config.getsection(name)
+            s = stepper.PrinterStepper(s_config)
+            self.steppers.append(s)
+            a = tuple([s_config.getfloat('anchor_' + n) for n in 'xyz'])
+            self.anchors.append(a)
+            stepper_configs.append((s, a))
+
+        # 2. Call setup_itersolve now that we have both anchors
+        # Stepper A
+        s_a, a_a = stepper_configs[0]
+        a_b = stepper_configs[1][1]
+        s_a.setup_itersolve('drawbot_stepper_alloc', *a_a, *a_b, self.k_factor, int(self.enable_catenary_compensation))
+        s_a.set_trapq(toolhead.get_trapq())
+        toolhead.register_step_generator(s_a.generate_steps)
+
+        # Stepper B
+        s_b, a_b = stepper_configs[1]
+        a_a = stepper_configs[0][1]
+        s_b.setup_itersolve('drawbot_stepper_alloc', *a_b, *a_a, self.k_factor, int(self.enable_catenary_compensation))
+        s_b.set_trapq(toolhead.get_trapq())
+        toolhead.register_step_generator(s_b.generate_steps)
 
         # Setup boundary checks
         # X range from left anchor to right anchor.

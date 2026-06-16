@@ -127,7 +127,8 @@ defs_kin_deltesian = """
 
 defs_kin_drawbot = """
     struct stepper_kinematics *drawbot_stepper_alloc(double anchor_x
-        , double anchor_y, double anchor_z);
+        , double anchor_y, double anchor_z, double other_x, double other_y
+        , double other_z, double k_factor, int is_catenary);
 """
 
 defs_kin_polar = """
