@@ -7,6 +7,7 @@ import stepper, math
 
 class DrawbotKinematics:
     def __init__(self, toolhead, config):
+        self.toolhead = toolhead
         # Setup steppers at each anchor
         self.steppers = []
         self.anchors = []
@@ -58,6 +59,11 @@ class DrawbotKinematics:
         self.axes_min = toolhead.Coord(min(self.anchors[0][0], self.anchors[1][0]), -300., 0., e=0.)
         self.axes_max = toolhead.Coord(max(self.anchors[0][0], self.anchors[1][0]), max(self.anchors[0][1], self.anchors[1][1]), 0., e=0.)
         self.set_position([0., 0., 0.], "")
+
+        # Register user status command
+        self.gcode = toolhead.printer.lookup_object('gcode')
+        self.gcode.register_command('GET_DRAWBOT_STATUS', self.cmd_GET_DRAWBOT_STATUS,
+                                    desc="Get current drawbot physics and tension status")
 
     def get_steppers(self):
         return list(self.steppers)
@@ -192,6 +198,53 @@ class DrawbotKinematics:
             'axis_minimum': self.axes_min,
             'axis_maximum': self.axes_max,
         }
+
+    def cmd_GET_DRAWBOT_STATUS(self, gcmd):
+        # Get current commanded position from toolhead
+        pos = self.toolhead.get_position()
+        x, y = pos[0], pos[1]
+        
+        # Calculate distance to anchors
+        L1 = math.sqrt((self.anchors[0][0] - x)**2 + (self.anchors[0][1] - y)**2)
+        L2 = math.sqrt((self.anchors[1][0] - x)**2 + (self.anchors[1][1] - y)**2)
+        
+        # Angles to the vertical
+        dy1 = self.anchors[0][1] - y
+        dy2 = self.anchors[1][1] - y
+        
+        if dy1 <= 0 or dy2 <= 0:
+            gcmd.respond_info("Error: Carriage is above anchor height!")
+            return
+            
+        sin_theta1 = (x - self.anchors[0][0]) / L1
+        cos_theta1 = dy1 / L1
+        
+        sin_theta2 = (self.anchors[1][0] - x) / L2
+        cos_theta2 = dy2 / L2
+        
+        denom = sin_theta1 * cos_theta2 + cos_theta1 * sin_theta2
+        g = 9.81
+        weight = self.toolhead_mass * g
+        
+        if abs(denom) < 0.001:
+            T1 = T2 = float('inf')
+        else:
+            T1 = weight * sin_theta2 / denom
+            T2 = weight * sin_theta1 / denom
+            
+        gcmd.respond_info(
+            "Drawbot Physics Status:\n"
+            "Position: X=%.2f mm, Y=%.2f mm\n"
+            "Left Cable (L1): %.2f mm (Tension: %.2f N)\n"
+            "Right Cable (L2): %.2f mm (Tension: %.2f N)\n"
+            "Cable Mass (Left/Right): %.2f g / %.2f g\n"
+            "Max Cable Tension Limit: %.2f N" % (
+                x, y, L1, T1, L2, T2,
+                L1 * self.cable_linear_density * 0.001,
+                L2 * self.cable_linear_density * 0.001,
+                self.max_cable_tension
+            )
+        )
 
 def load_kinematics(toolhead, config):
     return DrawbotKinematics(toolhead, config)
